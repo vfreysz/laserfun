@@ -26,6 +26,13 @@ laserfun requires Python 3.9+. `NumPy <https://www.numpy.org/>`__ and `SciPy <ht
 
 Sorry, were not on PyPi just yet. But soon!
 
+🐣 With piplite
+~~~~~~~~~~~
+
+    ``import piplite
+      await piplite.install("https://raw.githubusercontent.com/vfreysz/laserfun/master/dist/laserfun-0.0.1-py3-none-any.whl")``
+
+
 🐻 With setuptools
 ~~~~~~~~~~~~~~~~~~
 
