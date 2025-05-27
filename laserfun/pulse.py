@@ -436,6 +436,100 @@ class Pulse:
                              1j * (TOD / 6.0) * V**3 +
                              1j * (FOD / 24.0) * V**4) * self.AW
 
+    def apply_grating_compressor(self, grating_lines_per_mm, m, L_eff_m, theta_i_deg, N_passes_formula=2):
+        r"""
+        Applique la dispersion d'un compresseur à réseau à l'impulsion.
+
+        Le GDD et le TOD sont calculés à partir des paramètres du réseau de diffraction
+        et de la géométrie du compresseur, puis appliqués à la phase spectrale de l'impulsion.
+        Les formules utilisées sont basées sur le code fourni.
+
+        Parameters
+        ----------
+        grating_lines_per_mm : float
+            Le nombre de traits par millimètre du réseau.
+        m : int
+            L'ordre de diffraction (généralement -1 pour les réseaux en réflexion
+            utilisés dans les compresseurs).
+        L_eff_m : float
+            La longueur de trajet effective totale (L) en mètres, telle qu'utilisée
+            dans les formules de GDD/TOD fournies. La définition exacte de cette
+            longueur dépend de la configuration spécifique du compresseur
+            (par exemple, pour un compresseur de Treacy standard à double passage,
+            cela pourrait être lié à la distance inclinée entre les réseaux multipliée
+            par le nombre de passages entre eux).
+        theta_i_deg : float
+            L'angle d'incidence en degrés par rapport à la normale du réseau.
+        N_passes_formula : int, optional
+            Le nombre de "passages" (N) tel qu'utilisé dans les formules GDD/TOD
+            fournies. Par défaut à 2.
+
+        Returns
+        -------
+        None
+            La phase spectrale de l'objet impulsion est modifiée sur place.
+
+        Notes
+        -----
+        Les formules de GDD et TOD peuvent varier selon les conventions et la
+        configuration exacte du compresseur. Celles utilisées ici sont basées
+        sur le code fourni. Pour une grande précision, il est recommandé de
+        vérifier ces formules par rapport à des références établies en optique
+        pour votre configuration spécifique.
+        """
+        from scipy.constants import speed_of_light  # c en m/s
+        import numpy as np # S'assurer que numpy est importé si ce n'est pas déjà fait en haut du fichier
+
+        # Conversion des entrées en unités SI et types cohérents
+        lambda_0_m = self.center_wavelength_nm * 1e-9  # Longueur d'onde centrale en mètres
+        d_m = 1e-3 / grating_lines_per_mm             # Période du réseau en mètres/trait
+        theta_i_rad = np.deg2rad(theta_i_deg)         # Angle d'incidence en radians
+
+        val_in_trig_power_gdd = (-m * lambda_0_m / d_m) - np.sin(theta_i_rad)
+
+        if np.abs(val_in_trig_power_gdd) >= 1.0:
+            raise ValueError(
+                f"Impossible de calculer la dispersion GDD. Le terme |(-m*lambda/d - sin(theta_i))| = {np.abs(val_in_trig_power_gdd):.3f} >= 1. "
+                "Vérifiez les paramètres. Cela peut indiquer que l'angle de diffraction est irréel."
+            )
+        try:
+            term_trig_gdd = (1 - val_in_trig_power_gdd**2)**(-3/2)
+        except ZeroDivisionError:
+            raise ValueError(
+                "Division par zéro dans le calcul du GDD (terme trigonométrique). "
+                f"val_in_trig_power_gdd était {val_in_trig_power_gdd:.3f}, ce qui rend (1 - X^2) nul."
+            )
+
+        gdd_s2 = ((-N_passes_formula * (m**2) * (lambda_0_m**3) * L_eff_m) /
+                    (2 * np.pi * (speed_of_light**2) * (d_m**2))) * \
+                    term_trig_gdd
+
+        term_tod_numerator = (-3 * lambda_0_m / (2 * np.pi * speed_of_light)) * \
+                                (1 + (lambda_0_m / d_m) * np.sin(theta_i_rad) - (np.sin(theta_i_rad)**2))
+
+        term_tod_denominator_core = (lambda_0_m / d_m) - np.sin(theta_i_rad)
+
+        if np.abs(term_tod_denominator_core) >= 1.0:
+                raise ValueError(
+                f"Impossible de calculer la dispersion TOD. Le terme |(lambda/d - sin(theta_i))| = {np.abs(term_tod_denominator_core):.3f} >= 1. "
+                "Vérifiez les paramètres."
+            )
+
+        term_tod_denominator = 1 - term_tod_denominator_core**2
+        if np.isclose(term_tod_denominator, 0):
+            raise ValueError(
+                "Division par zéro dans le calcul du TOD (dénominateur). "
+                f"term_tod_denominator_core était {term_tod_denominator_core:.3f}, ce qui rend (1 - X^2) nul."
+            )
+
+        tod_s3 = (term_tod_numerator / term_tod_denominator) * gdd_s2
+
+        gdd_ps2 = gdd_s2 * 1e24
+        tod_ps3 = tod_s3 * 1e36
+
+        self.chirp_pulse_W(GDD=gdd_ps2, TOD=tod_ps3, FOD=0.0)
+
+
     def calc_width(self, level=0.5):
         """Calculate the pulse width.
         
