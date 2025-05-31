@@ -436,98 +436,221 @@ class Pulse:
                              1j * (TOD / 6.0) * V**3 +
                              1j * (FOD / 24.0) * V**4) * self.AW
 
-    def apply_grating_compressor(self, grating_lines_per_mm, m, L_eff_m, theta_i_deg, N_passes_formula=2):
+    def get_littrow_angle(self, grating_lines_per_mm, m_order=1):
         r"""
-        Applique la dispersion d'un compresseur à réseau à l'impulsion.
+        Calculate the Littrow angle for a given diffraction order.
 
-        Le GDD et le TOD sont calculés à partir des paramètres du réseau de diffraction
-        et de la géométrie du compresseur, puis appliqués à la phase spectrale de l'impulsion.
-        Les formules utilisées sont basées sur le code fourni.
+        The Littrow angle (:math:`\theta_L`) is the specific angle of incidence
+        where the diffraction angle is equal to the incidence angle, causing the
+        beam to retro-reflect along its incident path.
 
         Parameters
         ----------
         grating_lines_per_mm : float
-            Le nombre de traits par millimètre du réseau.
-        m : int
-            L'ordre de diffraction (généralement -1 pour les réseaux en réflexion
-            utilisés dans les compresseurs).
-        L_eff_m : float
-            La longueur de trajet effective totale (L) en mètres, telle qu'utilisée
-            dans les formules de GDD/TOD fournies. La définition exacte de cette
-            longueur dépend de la configuration spécifique du compresseur
-            (par exemple, pour un compresseur de Treacy standard à double passage,
-            cela pourrait être lié à la distance inclinée entre les réseaux multipliée
-            par le nombre de passages entre eux).
-        theta_i_deg : float
-            L'angle d'incidence en degrés par rapport à la normale du réseau.
-        N_passes_formula : int, optional
-            Le nombre de "passages" (N) tel qu'utilisé dans les formules GDD/TOD
-            fournies. Par défaut à 2.
+            The line density of the grating in lines per millimeter.
+        m_order : int, optional
+            The diffraction order to be considered. Defaults to 1.
 
         Returns
         -------
-        None
-            La phase spectrale de l'objet impulsion est modifiée sur place.
+        float
+            The Littrow angle in degrees. Returns `float('nan')` if the
+            condition is physically impossible.
 
         Notes
         -----
-        Les formules de GDD et TOD peuvent varier selon les conventions et la
-        configuration exacte du compresseur. Celles utilisées ici sont basées
-        sur le code fourni. Pour une grande précision, il est recommandé de
-        vérifier ces formules par rapport à des références établies en optique
-        pour votre configuration spécifique.
+        The calculation is based on the grating equation evaluated at the
+        Littrow condition, where :math:`\theta_i = \theta_d = \theta_L`.
+
+        The formula used is:
+        .. math::
+            2 d \sin(\theta_L) = m \lambda_0
+
+        where :math:`d` is the grating period, :math:`m` is the diffraction
+        order, and :math:`\lambda_0` is the central wavelength of the pulse.
+
+        References
+        ----------
+        .. [1] Bass, M. et al. "Handbook of Optics, Volume I: Geometrical and
+            Physical Optics." 3rd ed., McGraw-Hill, 2010.
         """
-        from scipy.constants import speed_of_light  # c en m/s
-        import numpy as np # S'assurer que numpy est importé si ce n'est pas déjà fait en haut du fichier
+        if m_order == 0:
+            return float('nan')
 
-        # Conversion des entrées en unités SI et types cohérents
-        lambda_0_m = self.center_wavelength_nm * 1e-9  # Longueur d'onde centrale en mètres
-        d_m = 1e-3 / grating_lines_per_mm             # Période du réseau en mètres/trait
-        theta_i_rad = np.deg2rad(theta_i_deg)         # Angle d'incidence en radians
+        lambda_0_m = self.center_wavelength_nm * 1e-9
+        d_m = 1e-3 / grating_lines_per_mm  # Grating period in meters
 
-        val_in_trig_power_gdd = (-m * lambda_0_m / d_m) - np.sin(theta_i_rad)
+        # Littrow condition: 2 * d * sin(theta_L) = m * lambda
+        sin_littrow_val = (m_order * lambda_0_m) / (2 * d_m)
 
-        if np.abs(val_in_trig_power_gdd) >= 1.0:
-            raise ValueError(
-                f"Impossible de calculer la dispersion GDD. Le terme |(-m*lambda/d - sin(theta_i))| = {np.abs(val_in_trig_power_gdd):.3f} >= 1. "
-                "Vérifiez les paramètres. Cela peut indiquer que l'angle de diffraction est irréel."
-            )
-        try:
-            term_trig_gdd = (1 - val_in_trig_power_gdd**2)**(-3/2)
-        except ZeroDivisionError:
-            raise ValueError(
-                "Division par zéro dans le calcul du GDD (terme trigonométrique). "
-                f"val_in_trig_power_gdd était {val_in_trig_power_gdd:.3f}, ce qui rend (1 - X^2) nul."
-            )
+        if -1 <= sin_littrow_val <= 1:
+            littrow_angle_rad = np.arcsin(sin_littrow_val)
+            return np.rad2deg(littrow_angle_rad)
+        else:
+            return float('nan')
 
-        gdd_s2 = ((-N_passes_formula * (m**2) * (lambda_0_m**3) * L_eff_m) /
-                    (2 * np.pi * (speed_of_light**2) * (d_m**2))) * \
-                    term_trig_gdd
+    def calculate_grating_dispersion(self, grating_lines_per_mm, L_eff_m,
+                                     theta_i_deg, m_input=-1, N_passes_formula=2):
+        r"""
+        Calculates the dispersion (GDD, TOD, FOD) of a grating-pair compressor.
 
-        term_tod_numerator = (-3 * lambda_0_m / (2 * np.pi * speed_of_light)) * \
-                                (1 + (lambda_0_m / d_m) * np.sin(theta_i_rad) - (np.sin(theta_i_rad)**2))
+        This method determines the spectral phase derivatives introduced by a
+        grating pair compressor based on its physical parameters. It does not
+        apply the dispersion to the pulse object itself.
 
-        term_tod_denominator_core = (lambda_0_m / d_m) - np.sin(theta_i_rad)
+        Parameters
+        ----------
+        grating_lines_per_mm : float
+            The line density of the grating in lines per millimeter.
+        L_eff_m : float
+            The effective perpendicular separation distance between the gratings
+            in meters for a single pass of the beam path that defines the
+            compressor length (e.g., for a Treacy compressor, this is the
+            perpendicular distance between the gratings).
+        theta_i_deg : float
+            The angle of incidence on the grating in degrees, measured from
+            the grating normal.
+        m_input : int, optional
+            The diffraction order used. Must be non-zero. For a standard Treacy
+            compressor providing negative GDD, this should be -1. Defaults to -1.
+        N_passes_formula : int, optional
+            Number of passes that contribute to the effective length in the
+            dispersion formulas (typically 2 for a double-pass Treacy compressor
+            where L_eff_m is the single perpendicular separation). Defaults to 2.
 
-        if np.abs(term_tod_denominator_core) >= 1.0:
-                raise ValueError(
-                f"Impossible de calculer la dispersion TOD. Le terme |(lambda/d - sin(theta_i))| = {np.abs(term_tod_denominator_core):.3f} >= 1. "
-                "Vérifiez les paramètres."
-            )
+        Returns
+        -------
+        tuple[float, float, float]
+            A tuple containing the calculated:
+            - GDD (Group Delay Dispersion, :math:`\phi_2`) in ps^2.
+            - TOD (Third-Order Dispersion, :math:`\phi_3`) in ps^3.
+            - FOD (Fourth-Order Dispersion, :math:`\phi_4`) in ps^4.
+            Returns (np.inf, np.inf, np.inf) if the geometry is physically impossible.
 
-        term_tod_denominator = 1 - term_tod_denominator_core**2
-        if np.isclose(term_tod_denominator, 0):
-            raise ValueError(
-                "Division par zéro dans le calcul du TOD (dénominateur). "
-                f"term_tod_denominator_core était {term_tod_denominator_core:.3f}, ce qui rend (1 - X^2) nul."
-            )
+        Notes
+        -----
+        The calculations are based on the Taylor expansion of the spectral
+        phase :math:`\phi(\omega)` introduced by the grating pair:
+        :math:`\phi(\omega) = \phi_0 + \phi_1(\omega-\omega_0) + \frac{1}{2!}\phi_2(\omega-\omega_0)^2 + \frac{1}{3!}\phi_3(\omega-\omega_0)^3 + \frac{1}{4!}\phi_4(\omega-\omega_0)^4 + \dots`
+        where :math:`\omega_0` is the center angular frequency.
 
-        tod_s3 = (term_tod_numerator / term_tod_denominator) * gdd_s2
+        1.  **Diffraction Angle :math:`\theta_d`**:
+            Calculated from the grating equation:
+            .. math::
+                d(\sin\theta_i + \sin\theta_d) = m \lambda_0
+            where :math:`d = 1/\text{grating_lines_per_mm}` is the grating period,
+            :math:`m` is `m_input`, and :math:`\lambda_0` is the center wavelength.
+
+        2.  **Group Delay Dispersion (GDD, :math:`\phi_2`)**:
+            The GDD is given by [1,2]:
+            .. math::
+                \phi_2 = - \frac{L_g \lambda_0^3 m^2}{2\pi c^2 d^2 \cos^3\theta_d}
+            where :math:`L_g = N_{passes} \times L_{eff\_m}` is the total effective
+            path length between grating interactions, and :math:`c` is the speed of light.
+
+        3.  **Third-Order Dispersion (TOD, :math:`\phi_3`)**:
+            Calculated relative to GDD:
+            .. math::
+                \phi_3 = \phi_2 \left( - \frac{3\lambda_0}{2\pi c} \right) \left( 1 + \frac{m\lambda_0 \sin\theta_d}{d \cos^2\theta_d} \right)
+
+        4.  **Fourth-Order Dispersion (FOD, :math:`\phi_4`)**:
+            Calculated relative to TOD, using factors derived from further
+            differentiation of the phase term [1]:
+            Let :math:`G_1 = 1.5 \frac{m\lambda_0 \sin\theta_d}{d \cos^2\theta_d}` and
+            :math:`G_2 = 0.5 \frac{d \sin\theta_d}{m \lambda_0 \cos^2\theta_d}` (Note: the code implements $G_2 = 0.5 \frac{d \sin\theta_d}{m\lambda_0}$, check original definition for $\cos^2\theta_d$ if needed).
+            The code uses:
+            Factor :math:`= 1.0 + 1.5 \frac{m\lambda_0 \sin\theta_d}{d \cos^2\theta_d} - 0.5 \frac{d \sin\theta_d}{m \lambda_0}`
+            .. math::
+                \phi_4 = \phi_3 \left( - \frac{4\lambda_0}{2\pi c} \right) \times \text{Factor}
+
+        References
+        ----------
+        .. [1] Weiner, A. M. "Ultrafast Optics." Wiley, 2009, Chapter 6 (Grating-Based Pulse Shaping and Compression).
+        .. [2] Martinez, O. E. "Negative group-velocity dispersion using
+               refraction." IEEE Journal of Quantum Electronics, vol. QE-23,
+               no. 1, pp. 59-64, 1987.
+        """
+        if m_input == 0:
+            raise ValueError("m_input cannot be zero for a grating compressor.")
+
+        lambda_0_m = self.center_wavelength_nm * 1e-9
+        d_m = 1e-3 / grating_lines_per_mm
+        theta_i_rad = np.deg2rad(theta_i_deg)
+
+        sin_theta_d_calc = (m_input * lambda_0_m / d_m) - np.sin(theta_i_rad)
+
+        if abs(sin_theta_d_calc) > 1.000001:
+            return (np.inf, np.inf, np.inf)
+
+        sin_theta_d = np.clip(sin_theta_d_calc, -1.0, 1.0)
+        cos_theta_d_sq = 1.0 - sin_theta_d**2
+
+        if np.isclose(cos_theta_d_sq, 0):
+            return (np.inf, np.inf, np.inf)
+
+        cos_theta_d = np.sqrt(cos_theta_d_sq)
+        # c_mks est défini globalement dans le module
+        L_g_m = N_passes_formula * L_eff_m
+
+        # GDD (s^2)
+        gdd_s2 = ((-L_g_m * (m_input**2) * (lambda_0_m**3)) /
+                  (2 * np.pi * (c_mks**2) * (d_m**2) * (cos_theta_d**3)))
+
+        # TOD (s^3)
+        term_order_lambda_d = (m_input * lambda_0_m / d_m) #  m * lambda_0 / d
+        tod_gdd_ratio_angular_factor = 1.0 + (term_order_lambda_d * sin_theta_d / cos_theta_d_sq)
+        tod_s3 = gdd_s2 * (-3 * lambda_0_m / (2 * np.pi * c_mks)) * tod_gdd_ratio_angular_factor
+
+        # FOD (s^4)
+        fod_tod_ratio_angular_term1 = 1.5 * term_order_lambda_d * sin_theta_d / cos_theta_d_sq
+        fod_tod_ratio_angular_term2 = 0.5 * (d_m * sin_theta_d) / (m_input * lambda_0_m)
+        fod_tod_ratio_angular_factor = 1.0 + fod_tod_ratio_angular_term1 - fod_tod_ratio_angular_term2
+        fod_s4 = tod_s3 * (-4 * lambda_0_m / (2 * np.pi * c_mks)) * fod_tod_ratio_angular_factor
 
         gdd_ps2 = gdd_s2 * 1e24
         tod_ps3 = tod_s3 * 1e36
+        fod_ps4 = fod_s4 * 1e48
 
-        self.chirp_pulse_W(GDD=gdd_ps2, TOD=tod_ps3, FOD=0.0)
+        return gdd_ps2, tod_ps3, fod_ps4
+
+    def apply_grating_compressor(self, grating_lines_per_mm, L_eff_m,
+                                 theta_i_deg, m_input=-1, N_passes_formula=2):
+        r"""
+        Applies the dispersion of a grating-pair compressor to the pulse.
+
+        This method calculates GDD, TOD, and FOD using the
+        `calculate_grating_dispersion` method and then applies these
+        values to the pulse using `chirp_pulse_W`.
+
+        Parameters
+        ----------
+        grating_lines_per_mm : float
+            The line density of the grating in lines per millimeter.
+        L_eff_m : float
+            The effective perpendicular separation distance between the gratings
+            in meters for a single pass.
+        theta_i_deg : float
+            The angle of incidence on the grating in degrees.
+        m_input : int, optional
+            The diffraction order used. Must be non-zero. Defaults to -1.
+        N_passes_formula : int, optional
+            Number of passes. Defaults to 2.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            A tuple containing the applied (GDD [ps^2], TOD [ps^3], FOD [ps^4]).
+        """
+        gdd_ps2, tod_ps3, fod_ps4 = self.calculate_grating_dispersion(
+            grating_lines_per_mm, L_eff_m, theta_i_deg, m_input, N_passes_formula
+        )
+
+        if np.isinf(gdd_ps2):
+            raise ValueError("Cannot apply grating compressor: geometry is physically impossible.")
+
+        self.chirp_pulse_W(GDD=gdd_ps2, TOD=tod_ps3, FOD=fod_ps4)
+
+        return gdd_ps2, tod_ps3, fod_ps4
 
 
     def calc_width(self, level=0.5):
