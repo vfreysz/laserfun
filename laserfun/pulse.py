@@ -924,7 +924,276 @@ class Pulse:
         
         else:
             raise ValueError('wavelength_or_frequency must be either "wavelength" or "frequency"')
+    
+    def _get_spectral_fwhm(self, x_data_thz, spectral_amplitude_sq):
+        """
+        Internal helper to calculate FWHM for spectral data.
 
+        Operates on frequency in THz and spectral intensity (amplitude squared).
+
+        Args:
+            x_data_thz (np.ndarray): Frequency data in THz.
+            spectral_amplitude_sq (np.ndarray): Spectral intensity (abs(amplitude)^2).
+
+        Returns:
+            float: Full width at half maximum in THz. Returns 0 if FWHM cannot be determined.
+        """
+        if np.max(spectral_amplitude_sq) == 0:
+            return 0.0
+        intensity_norm = spectral_amplitude_sq / np.max(spectral_amplitude_sq)
+        level = 0.5
+        above_half_max_indices = np.where(intensity_norm > level)[0]
+
+        if len(above_half_max_indices) < 2:
+            return 0.0  # Not enough points above half-maximum
+
+        first_idx = above_half_max_indices[0]
+        last_idx = above_half_max_indices[-1]
+
+        # Handle cases where the peak is at the edge or too narrow for interpolation
+        if first_idx == 0 or last_idx == len(intensity_norm) - 1: # Touches edge
+            return x_data_thz[last_idx] - x_data_thz[first_idx]
+        if first_idx -1 < 0 or last_idx + 1 >= len(intensity_norm): # Not enough points for interp
+            return x_data_thz[last_idx] - x_data_thz[first_idx]
+
+
+        # Interpolate to find the exact crossing points
+        def find_root_interp(x_segment, y_segment_norm):
+            if y_segment_norm[0] == y_segment_norm[-1]: # Avoid division by zero if flat
+                return x_segment[0] 
+            return np.interp(level, y_segment_norm, x_segment)
+
+        # Rising edge
+        x1 = find_root_interp(x_data_thz[first_idx-1 : first_idx+1], intensity_norm[first_idx-1 : first_idx+1])
+        # Falling edge
+        x2 = find_root_interp(x_data_thz[last_idx : last_idx+2], intensity_norm[last_idx : last_idx+2])
+        
+        return np.abs(x2 - x1)
+
+    def plot_temporal(self, show_phase=True, ax=None):
+        """
+        Plots the temporal intensity and, optionally, the centered phase of the pulse.
+
+        The intensity is normalized to its peak. The phase, if shown, is unwrapped
+        and centered by subtracting its value at t=0 (or the closest point).
+        A grid is added for readability, and the FWHM of the temporal intensity
+        is calculated and displayed in the legend.
+
+        Args:
+            show_phase (bool, optional): If True (default), plots the phase on a
+                secondary y-axis.
+            ax (matplotlib.axes.Axes, optional): A Matplotlib Axes object to plot on.
+                If None (default), a new figure and axes are created with a
+                default size of (8, 5).
+
+        Returns:
+            tuple (matplotlib.figure.Figure, matplotlib.axes.Axes):
+                A tuple containing the Matplotlib Figure object and the primary Axes
+                object on which the intensity profile was plotted.
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 5))
+        else:
+            fig = ax.get_figure()
+
+        time_ps = self.t_ps  # Time array in picoseconds from Pulse property
+        intensity_watts = self.it  # Temporal intensity in Watts from Pulse property
+        
+        # Normalize intensity for plotting
+        if np.max(intensity_watts) > 0:
+            intensity_norm = intensity_watts / np.max(intensity_watts)
+        else:
+            intensity_norm = intensity_watts # Avoid division by zero if pulse is zero
+
+        fwhm_ps = self.calc_width()  # Temporal FWHM in ps from Pulse method
+
+        # Plot temporal intensity
+        color_intensity = 'b'
+        line_profil, = ax.plot(time_ps, intensity_norm, color=color_intensity, label='Intensity (norm.)')
+        ax.set_xlabel('Time (ps)')
+        ax.set_ylabel('Intensity (a.u.)', color=color_intensity)
+        ax.tick_params(axis='y', labelcolor=color_intensity)
+        ax.set_title('Temporal Profile')
+        ax.grid(True, linestyle='--', alpha=0.7)
+
+        # Prepare legend items
+        handles = [line_profil]
+        labels_legend = [line_profil.get_label()]
+        
+        fwhm_text = ""
+        if not np.isnan(fwhm_ps) and fwhm_ps > 0:
+            fwhm_text = f'FWHM = {fwhm_ps:.2f} ps'
+            # Create a dummy artist for the FWHM text in the legend
+            line_fwhm_dummy, = ax.plot([], [], linestyle='None', color='none', label=fwhm_text)
+            handles.append(line_fwhm_dummy)
+            labels_legend.append(fwhm_text)
+
+        ax2 = None # Initialize for return value if phase is not shown
+        if show_phase:
+            complex_amplitude_t = self.at # Complex temporal amplitude from Pulse property
+            phase_rad = np.unwrap(np.angle(complex_amplitude_t))
+            
+            # Center the phase at t=0
+            t_zero_index = np.argmin(np.abs(time_ps))
+            phase_centered_rad = phase_rad - phase_rad[t_zero_index]
+
+            # Plot phase on a secondary y-axis
+            color_phase = 'r'
+            ax2 = ax.twinx()
+            line_phase, = ax2.plot(time_ps, phase_centered_rad, color=color_phase, linestyle='--', label='Phase')
+            ax2.set_ylabel('Phase (rad)', color=color_phase)
+            ax2.tick_params(axis='y', labelcolor=color_phase)
+
+            # Set symmetric y-axis limits for the centered phase
+            max_abs_phase = np.max(np.abs(phase_centered_rad))
+            if max_abs_phase > 0:
+                ax2.set_ylim(-max_abs_phase * 1.2, max_abs_phase * 1.2)
+            
+            handles.append(line_phase)
+            labels_legend.append(line_phase.get_label())
+        
+        # Display legend
+        legend_axis = ax2 if show_phase and ax2 is not None else ax
+        legend_axis.legend(handles, labels_legend, loc='best')
+
+        # Attempt to apply tight_layout for better spacing
+        if fig.get_layout_engine() is None or fig.get_layout_engine()._adjust_compatible:
+            try:
+                fig.tight_layout()
+            except Exception: # Catch any potential error from tight_layout
+                pass
+                
+        return fig, ax
+
+    def plot_spectral(self, x_axis='wavelength', show_phase=True, ax=None):
+        """
+        Plots the spectral intensity and, optionally, the centered phase of the pulse.
+
+        The spectral intensity is normalized to its peak. The x-axis can be either
+        wavelength (nm) or frequency (THz). The phase, if shown, is unwrapped and
+        centered around its value at the pulse's central frequency.
+        A grid is added, and the FWHM of the spectral intensity is displayed.
+
+        Args:
+            x_axis (str, optional): Determines the x-axis domain.
+                Can be 'wavelength' (default) for wavelength in nm,
+                or 'frequency' for frequency in THz.
+            show_phase (bool, optional): If True (default), plots the phase on a
+                secondary y-axis.
+            ax (matplotlib.axes.Axes, optional): A Matplotlib Axes object to plot on.
+                If None (default), a new figure and axes are created with a
+                default size of (8, 5).
+
+        Returns:
+            tuple (matplotlib.figure.Figure, matplotlib.axes.Axes):
+                A tuple containing the Matplotlib Figure object and the primary Axes
+                object on which the spectral intensity was plotted.
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 5))
+        else:
+            fig = ax.get_figure()
+
+        freq_thz = self.f_THz  # Absolute frequency grid in THz from Pulse property
+        spectral_amplitude_sq = np.abs(self.aw)**2 # Spectral intensity (raw, |A(w)|^2)
+
+        # Calculate FWHM of the spectral intensity in THz
+        fwhm_thz = self._get_spectral_fwhm(freq_thz, spectral_amplitude_sq)
+
+        # Center the spectral phase at the pulse's defined central frequency
+        complex_amplitude_w = self.aw # Complex spectral amplitude from Pulse property
+        full_phase_rad = np.unwrap(np.angle(complex_amplitude_w))
+        
+        # Find index closest to the pulse's nominal center frequency
+        f_center_index = np.argmin(np.abs(freq_thz - self.centerfrequency_THz))
+        phase_offset_rad = full_phase_rad[f_center_index]
+        phase_centered_rad = full_phase_rad - phase_offset_rad
+
+        phase_to_plot = None # Initialize
+        if x_axis == 'wavelength':
+            x_values = self.wavelength_nm # Wavelength grid in nm from Pulse property
+            # Use PSD method for intensity to handle Jacobian transformation and units
+            intensity_mW_nm = self.psd(units='mW/nm') 
+            
+            # Data is usually sorted by frequency; wavelength will be descending.
+            # Sort by wavelength for plotting.
+            sort_order = np.argsort(x_values)
+            x_values = x_values[sort_order]
+            intensity_mW_nm_sorted = intensity_mW_nm[sort_order]
+            if show_phase:
+                phase_to_plot = phase_centered_rad[sort_order]
+                
+            xlabel = 'Wavelength (nm)'
+            # Convert spectral FWHM from THz to nm bandwidth
+            fwhm_val = (self.center_wavelength_nm**2 / c_nmps) * fwhm_thz
+            fwhm_unit = 'nm'
+            current_intensity_data = intensity_mW_nm_sorted
+
+        elif x_axis == 'frequency':
+            x_values = freq_thz
+            intensity_mW_thz = self.psd(units='mW/THz')
+            if show_phase:
+                phase_to_plot = phase_centered_rad
+            xlabel = 'Frequency (THz)'
+            fwhm_val = fwhm_thz
+            fwhm_unit = 'THz'
+            current_intensity_data = intensity_mW_thz
+        else:
+            raise ValueError("Argument 'x_axis' must be 'frequency' or 'wavelength'.")
+
+        # Normalize intensity for plotting
+        if np.max(current_intensity_data) > 0:
+            intensity_norm = current_intensity_data / np.max(current_intensity_data)
+        else:
+            intensity_norm = current_intensity_data
+
+        # Plot spectral intensity
+        color_intensity = 'b'
+        line_profil, = ax.plot(x_values, intensity_norm, color=color_intensity, label='Intensity (norm.)')
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('Intensity (a.u.)', color=color_intensity)
+        ax.tick_params(axis='y', labelcolor=color_intensity)
+        ax.set_title('Spectral Profile')
+        ax.grid(True, linestyle='--', alpha=0.7)
+
+        # Prepare legend items
+        handles = [line_profil]
+        labels_legend = [line_profil.get_label()]
+
+        fwhm_text = ""
+        if not np.isnan(fwhm_val) and fwhm_val > 0: # Check if FWHM is valid
+            fwhm_text = f'FWHM = {fwhm_val:.3f} {fwhm_unit}'
+            line_fwhm_dummy, = ax.plot([], [], linestyle='None', color='none', label=fwhm_text)
+            handles.append(line_fwhm_dummy)
+            labels_legend.append(fwhm_text)
+        
+        ax2 = None # Initialize for return value
+        if show_phase and phase_to_plot is not None:
+            # Plot phase on a secondary y-axis
+            color_phase = 'r'
+            ax2 = ax.twinx()
+            line_phase, = ax2.plot(x_values, phase_to_plot, color=color_phase, linestyle='--', label='Phase')
+            ax2.set_ylabel('Phase (rad)', color=color_phase)
+            ax2.tick_params(axis='y', labelcolor=color_phase)
+
+            max_abs_phase = np.max(np.abs(phase_to_plot))
+            if max_abs_phase > 0: # Avoid issues if phase is all zero
+                ax2.set_ylim(-max_abs_phase * 1.2, max_abs_phase * 1.2)
+            
+            handles.append(line_phase)
+            labels_legend.append(line_phase.get_label())
+
+        # Display legend
+        legend_axis = ax2 if show_phase and ax2 is not None else ax
+        legend_axis.legend(handles, labels_legend, loc='best')
+        
+        if fig.get_layout_engine() is None or fig.get_layout_engine()._adjust_compatible:
+            try:
+                fig.tight_layout()
+            except Exception:
+                pass
+                
+        return fig, ax
     
 def FFT_t(A, ax=0):
     """Do a FFT with fft-shifting."""
